@@ -47,6 +47,15 @@ class WhisperService:
         self._semaphore = asyncio.Semaphore(1)
         logger.info("whisper.cpp model loaded successfully.")
 
+    @property
+    def is_busy(self) -> bool:
+        """
+        Returns True if a transcription is currently running.
+        Used by the WebSocket endpoint to discard stale partial segments
+        instead of queuing them behind an already-running inference.
+        """
+        return self._semaphore.locked()
+
     async def transcribe_streaming(
         self,
         audio_data: np.ndarray,

@@ -26,7 +26,7 @@ async def websocket_endpoint(
     # ── Validate query params before accepting the connection ─────────────
     try:
         params = AudioQueryParams(
-            lang_in=websocket.query_params.get("lang_in", "es"),
+            lang_in=websocket.query_params.get("lang_in", "en"),
             lang_out=websocket.query_params.get("lang_out", "original"),
         )
     except ValidationError as exc:
@@ -59,6 +59,11 @@ async def websocket_endpoint(
     whisper_svc = get_whisper_service()
     decoder = OpusAudioDecoder()
 
+    # Tracks the most recent partial audio per sentence_id so we can
+    # process the latest version when Whisper is finally free, instead
+    # of a stale earlier version.
+    latest_partial: dict[int, bytes] = {}
+
     logger.info(
         f"[WS] Client connected — lang_in={lang_in}, lang_out={lang_out}, "
         f"task={task}, ai_translation={ai_translation_active}"
@@ -75,6 +80,28 @@ async def websocket_endpoint(
             message = decoder.decode_message(data)
             sid = message.sentence_id
 
+            # ── Backpressure: discard stale partial segments ───────────────────
+            # The plugin sends a partial every ~1 s containing the FULL accumulated
+            # audio for that sentence_id. If Whisper is already running, queueing
+            # another partial causes a chain of back-to-back inferences that all
+            # replay the same growing audio — the visible "catch-up" effect.
+            #
+            # Rules:
+            #   - Partial while Whisper is free  → process normally.
+            #   - Partial while Whisper is busy  → store it, skip processing.
+            #   - Final                          → always process; clear stored partial.
+            if not message.is_final:
+                latest_partial[sid] = data  # keep the freshest version
+                if whisper_svc.is_busy:
+                    logger.debug(
+                        f"[WS] Dropped stale partial sid={sid} — Whisper busy"
+                    )
+                    continue
+            else:
+                # Final arrived: we no longer need the buffered partial
+                latest_partial.pop(sid, None)
+
+            # 2. Dispatch to the active transcription pipeline.
             if ai_translation_active:
                 # ── Pipeline: Whisper transcribes → AI translates (streaming) ──
 
@@ -103,7 +130,7 @@ async def websocket_endpoint(
                         response.model_dump_json(exclude_none=True)
                     )
 
-                # 2. Run streaming transcription; on_segment_with_ai handles
+                # 3. Run streaming transcription; on_segment_with_ai handles
                 #    the AI translation for each resulting segment.
                 await whisper_svc.transcribe_streaming(
                     audio_data=message.audio_pcm,
@@ -128,7 +155,7 @@ async def websocket_endpoint(
                         response.model_dump_json(exclude_none=True)
                     )
 
-                # 3. Run streaming transcription with the accumulated audio.
+                # 4. Run streaming transcription with the accumulated audio.
                 await whisper_svc.transcribe_streaming(
                     audio_data=message.audio_pcm,
                     on_segment=on_segment,
