@@ -25,7 +25,7 @@ opuslib
 
 # Whisper inference (whisper.cpp Python binding)
 # See env.example for GPU backend instructions (Vulkan / CUDA / CPU)
-pywhispercpp
+faster-whisper
 
 # AI Translator (OpenAI-compatible client — works with Ollama, vLLM, LM Studio, etc.)
 # Only required when TRANSLATOR_PROVIDER=generic

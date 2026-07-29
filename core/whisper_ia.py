@@ -5,7 +5,7 @@ import threading
 from typing import Callable, Awaitable
 
 import numpy as np
-from pywhispercpp.model import Model
+from faster_whisper import WhisperModel
 
 logging.basicConfig(level=logging.INFO, format='%(levelname)s:     %(message)s')
 logger = logging.getLogger(__name__)
@@ -37,10 +37,11 @@ class WhisperService:
             f"Loading whisper.cpp model '{model_name}' "
             f"(threads={n_threads}, use_gpu={use_gpu})..."
         )
-        self.model = Model(
-            model_name,
-            n_threads=n_threads,
-            context_params={"use_gpu": use_gpu},
+        self.model = WhisperModel(
+            model_size_or_path=model_name,
+            device="cuda" if use_gpu else "cpu",
+            compute_type="float16" if use_gpu else "int8",
+            cpu_threads=n_threads,
         )
         # Serializes access to the whisper.cpp model — it is NOT thread-safe.
         self._semaphore = asyncio.Semaphore(1)
@@ -73,23 +74,20 @@ class WhisperService:
         lang = language if language and language not in ("auto", "original", "") else ""
         translate = task == "translate"
 
-        # Collect segments from the synchronous whisper.cpp callback
-        # using a plain list — safe because transcribe() is single-threaded.
+        # Collect segments returned by faster-whisper.
         collected: list[str] = []
-
-        def _on_segment_sync(segment) -> None:
-            text = segment.text.strip()
-            if text:
-                collected.append(text)
 
         def _run_transcription() -> None:
             logger.info(f"[Whisper] transcribe → language='{lang}', translate={translate}")
-            self.model.transcribe(
+            segments, _ = self.model.transcribe(
                 audio_data,
-                language=lang,
-                translate=translate,
-                new_segment_callback=_on_segment_sync,
+                language=lang if lang else None,
+                task="translate" if translate else "transcribe",
             )
+            for segment in segments:
+                text = segment.text.strip()
+                if text:
+                    collected.append(text)
 
         # Acquire the semaphore BEFORE entering the thread pool.
         # This guarantees that only one transcription runs at a time,
