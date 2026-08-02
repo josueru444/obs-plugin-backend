@@ -99,84 +99,88 @@ async def websocket_endpoint(
 
             for message in to_process:
                 sid = message.sentence_id
-            if ai_translation_active:
-                # ── Pipeline: Whisper transcribes → AI translates (streaming) ──
 
-                async def on_segment_with_ai(
-                    text: str, is_final: bool, sid: int = sid
-                ) -> None:
-                    """
-                    Streams each Whisper segment through the AI translator
-                    and forwards tokens to the OBS plugin as they arrive.
-                    The full accumulated translation is sent as a single
-                    final message once streaming completes.
-                    """
-                    accumulated = ""
-                    async for token in translator.translate_stream(text, lang_in, lang_out):
-                        accumulated += token
+                if ai_translation_active:
+                    # ── Pipeline: Whisper transcribes → AI translates (streaming) ──
 
-                    # Send the full translated segment as a single response.
-                    # We do NOT stream partial tokens because the LLM translates the whole
-                    # growing sentence from scratch every second, which would cause a severe
-                    # "re-typing" flicker in the OBS subtitles.
-                    response = WSResponse(
-                        text=accumulated.strip(),
-                        sentence_id=sid,
-                        is_final=is_final,
-                    )
-                    try:
-                        await websocket.send_text(
-                            response.model_dump_json(exclude_none=True)
+                    async def on_segment_with_ai(
+                        text: str, is_final: bool, sid: int = sid
+                    ) -> None:
+                        """
+                        Streams each Whisper segment through the AI translator
+                        and forwards tokens to the OBS plugin as they arrive.
+                        The full accumulated translation is sent as a single
+                        final message once streaming completes.
+                        If the AI translator fails, fallback to the raw transcribed text.
+                        """
+                        accumulated = ""
+                        try:
+                            async for token in translator.translate_stream(text, lang_in, lang_out):
+                                accumulated += token
+                        except Exception as exc:
+                            logger.warning(f"[WS] AI Translator stream error: {exc}. Falling back to raw transcript.")
+                            accumulated = text
+
+                        out_text = accumulated.strip() if accumulated.strip() else text.strip()
+
+                        response = WSResponse(
+                            text=out_text,
+                            sentence_id=sid,
+                            is_final=is_final,
                         )
-                    except RuntimeError as exc:
-                        if "websocket.close" in str(exc):
-                            logger.info(f"[WS] Client disconnected before AI segment could be sent (sid={sid})")
-                        else:
-                            raise
-                    except Exception as exc:
-                        logger.warning(f"[WS] Error sending AI segment: {exc}")
+                        try:
+                            await websocket.send_text(
+                                response.model_dump_json(exclude_none=True)
+                            )
+                        except RuntimeError as exc:
+                            if "websocket.close" in str(exc):
+                                logger.info(f"[WS] Client disconnected before AI segment could be sent (sid={sid})")
+                            else:
+                                raise
+                        except Exception as exc:
+                            logger.warning(f"[WS] Error sending AI segment: {exc}")
 
-                # 3. Run streaming transcription; on_segment_with_ai handles
-                #    the AI translation for each resulting segment.
-                await whisper_svc.transcribe_streaming(
-                    audio_data=message.audio_pcm,
-                    on_segment=on_segment_with_ai,
-                    language=lang_in,
-                    task=task,
-                    is_final_message=message.is_final,
-                )
-
-            else:
-                # ── Pipeline: Whisper transcribes/translates directly ──────────
-
-                async def on_segment(
-                    text: str, is_final: bool, sid: int = sid
-                ) -> None:
-                    response = WSResponse(
-                        text=text,
-                        sentence_id=sid,
-                        is_final=is_final,
+                    # 3. Run streaming transcription; on_segment_with_ai handles
+                    #    the AI translation for each resulting segment.
+                    await whisper_svc.transcribe_streaming(
+                        audio_data=message.audio_pcm,
+                        on_segment=on_segment_with_ai,
+                        language=lang_in,
+                        task=task,
+                        is_final_message=message.is_final,
                     )
-                    try:
-                        await websocket.send_text(
-                            response.model_dump_json(exclude_none=True)
-                        )
-                    except RuntimeError as exc:
-                        if "websocket.close" in str(exc):
-                            logger.info(f"[WS] Client disconnected before Whisper segment could be sent (sid={sid})")
-                        else:
-                            raise
-                    except Exception as exc:
-                        logger.warning(f"[WS] Error sending Whisper segment: {exc}")
 
-                # 4. Run streaming transcription with the accumulated audio.
-                await whisper_svc.transcribe_streaming(
-                    audio_data=message.audio_pcm,
-                    on_segment=on_segment,
-                    language=lang_in,
-                    task=task,
-                    is_final_message=message.is_final,
-                )
+                else:
+                    # ── Pipeline: Whisper transcribes/translates directly ──────────
+
+                    async def on_segment(
+                        text: str, is_final: bool, sid: int = sid
+                    ) -> None:
+                        response = WSResponse(
+                            text=text,
+                            sentence_id=sid,
+                            is_final=is_final,
+                        )
+                        try:
+                            await websocket.send_text(
+                                response.model_dump_json(exclude_none=True)
+                            )
+                        except RuntimeError as exc:
+                            if "websocket.close" in str(exc):
+                                logger.info(f"[WS] Client disconnected before Whisper segment could be sent (sid={sid})")
+                            else:
+                                raise
+                        except Exception as exc:
+                            logger.warning(f"[WS] Error sending Whisper segment: {exc}")
+
+                    # 4. Run streaming transcription with the accumulated audio.
+                    await whisper_svc.transcribe_streaming(
+                        audio_data=message.audio_pcm,
+                        on_segment=on_segment,
+                        language=lang_in,
+                        task=task,
+                        is_final_message=message.is_final,
+                    )
 
     except WebSocketDisconnect:
         logger.info("[WS] Client disconnected")
