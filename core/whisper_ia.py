@@ -108,12 +108,11 @@ class WhisperService:
             return
 
         # Stream collected segments back to the WebSocket caller.
-        # All but the last segment are partial; the last one carries
-        # the is_final flag from the original OBS message.
-        for i, text in enumerate(collected):
-            is_last = i == len(collected) - 1
-            segment_is_final = is_final_message if is_last else False
-            await on_segment(text, segment_is_final)
+        # We concatenate all segments into a single string representing the
+        # full transcription of the current audio buffer to prevent the client
+        # from overwriting partial sentences with the same sentence ID.
+        full_text = " ".join(collected)
+        await on_segment(full_text, is_final_message)
 
 
 # ─── Singleton ────────────────────────────────────────────────────────────────

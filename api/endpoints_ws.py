@@ -117,12 +117,25 @@ async def websocket_endpoint(
                         try:
                             async for token in translator.translate_stream(text, lang_in, lang_out):
                                 accumulated += token
+                                # Stream intermediate partial tokens
+                                partial_response = WSResponse(
+                                    text=accumulated.strip(),
+                                    sentence_id=sid,
+                                    is_final=False,
+                                )
+                                try:
+                                    await websocket.send_text(
+                                        partial_response.model_dump_json(exclude_none=True)
+                                    )
+                                except RuntimeError:
+                                    pass # Connection might be closed, handled gracefully at the end
                         except Exception as exc:
                             logger.warning(f"[WS] AI Translator stream error: {exc}. Falling back to raw transcript.")
                             accumulated = text
 
                         out_text = accumulated.strip() if accumulated.strip() else text.strip()
 
+                        # Send the final accumulated text with the correct is_final flag
                         response = WSResponse(
                             text=out_text,
                             sentence_id=sid,

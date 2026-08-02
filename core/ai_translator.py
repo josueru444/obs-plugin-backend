@@ -153,21 +153,25 @@ class GenericAITranslator(BaseTranslator):
             source_lang=source_lang, target_lang=target_lang
         )
 
-        logger.debug(
-            f"[AITranslator] Translating segment "
-            f"({source_lang}→{target_lang}): '{text[:60]}...'"
+        logger.info(
+            f"[AITranslator] Requesting translation via {self._client.base_url} (model={self._model})"
         )
 
-        stream = await self._client.chat.completions.create(
-            model=self._model,
-            messages=[
-                {"role": "system", "content": system_msg},
-                {"role": "user", "content": text},
-            ],
-            max_tokens=self._max_tokens,
-            stream=True,
-            temperature=0.1,  # Low temperature for consistent, accurate translations
-        )
+        try:
+            stream = await self._client.chat.completions.create(
+                model=self._model,
+                messages=[
+                    {"role": "system", "content": system_msg},
+                    {"role": "user", "content": text},
+                ],
+                max_tokens=self._max_tokens,
+                stream=True,
+                temperature=0.1,  # Low temperature for consistent, accurate translations
+            )
+        except Exception as err:
+            cause = f" Cause: {err.__cause__}" if getattr(err, '__cause__', None) else ""
+            logger.error(f"[AITranslator] Connection error to {self._client.base_url}: {err}{cause}")
+            raise
 
         async for chunk in stream:
             delta = chunk.choices[0].delta.content
