@@ -126,7 +126,7 @@ class GenericAITranslator(BaseTranslator):
                 "Install it with: pip install openai"
             ) from exc
 
-        self._client = AsyncOpenAI(base_url=base_url, api_key=api_key)
+        self._client = AsyncOpenAI(base_url=base_url, api_key=api_key, max_retries=0)
         self._model = model
         self._max_tokens = max_tokens
 

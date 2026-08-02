@@ -182,8 +182,8 @@ async def websocket_endpoint(
                         is_final_message=message.is_final,
                     )
 
-    except WebSocketDisconnect:
-        logger.info("[WS] Client disconnected")
+    except (WebSocketDisconnect, RuntimeError) as e:
+        logger.info(f"[WS] Client disconnected or socket closed: {e}")
     except Exception as e:
         logger.error(f"[WS] Unhandled error: {e}", exc_info=True)
         try:
