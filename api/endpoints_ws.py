@@ -114,39 +114,27 @@ async def websocket_endpoint(
                     accumulated = ""
                     async for token in translator.translate_stream(text, lang_in, lang_out):
                         accumulated += token
-                        # Stream the partial translation so the user sees words appearing
-                        response = WSResponse(
-                            text=accumulated.lstrip(),
-                            sentence_id=sid,
-                            is_final=False,
-                        )
-                        try:
-                            await websocket.send_text(
-                                response.model_dump_json(exclude_none=True)
-                            )
-                        except RuntimeError as exc:
-                            if "websocket.close" in str(exc):
-                                logger.info(f"[WS] Client disconnected before AI segment could be sent (sid={sid})")
-                                return
-                            else:
-                                raise
-                        except Exception as exc:
-                            logger.warning(f"[WS] Error sending AI segment: {exc}")
-                            return
 
-                    # Send the final flag once streaming is complete, if the original message was final
-                    if is_final:
-                        response = WSResponse(
-                            text=accumulated.strip(),
-                            sentence_id=sid,
-                            is_final=True,
+                    # Send the full translated segment as a single response.
+                    # We do NOT stream partial tokens because the LLM translates the whole
+                    # growing sentence from scratch every second, which would cause a severe
+                    # "re-typing" flicker in the OBS subtitles.
+                    response = WSResponse(
+                        text=accumulated.strip(),
+                        sentence_id=sid,
+                        is_final=is_final,
+                    )
+                    try:
+                        await websocket.send_text(
+                            response.model_dump_json(exclude_none=True)
                         )
-                        try:
-                            await websocket.send_text(
-                                response.model_dump_json(exclude_none=True)
-                            )
-                        except Exception:
-                            pass
+                    except RuntimeError as exc:
+                        if "websocket.close" in str(exc):
+                            logger.info(f"[WS] Client disconnected before AI segment could be sent (sid={sid})")
+                        else:
+                            raise
+                    except Exception as exc:
+                        logger.warning(f"[WS] Error sending AI segment: {exc}")
 
                 # 3. Run streaming transcription; on_segment_with_ai handles
                 #    the AI translation for each resulting segment.
