@@ -126,9 +126,17 @@ async def websocket_endpoint(
                         sentence_id=sid,
                         is_final=is_final,
                     )
-                    await websocket.send_text(
-                        response.model_dump_json(exclude_none=True)
-                    )
+                    try:
+                        await websocket.send_text(
+                            response.model_dump_json(exclude_none=True)
+                        )
+                    except RuntimeError as exc:
+                        if "websocket.close" in str(exc):
+                            logger.info(f"[WS] Client disconnected before AI segment could be sent (sid={sid})")
+                        else:
+                            raise
+                    except Exception as exc:
+                        logger.warning(f"[WS] Error sending AI segment: {exc}")
 
                 # 3. Run streaming transcription; on_segment_with_ai handles
                 #    the AI translation for each resulting segment.
@@ -151,9 +159,17 @@ async def websocket_endpoint(
                         sentence_id=sid,
                         is_final=is_final,
                     )
-                    await websocket.send_text(
-                        response.model_dump_json(exclude_none=True)
-                    )
+                    try:
+                        await websocket.send_text(
+                            response.model_dump_json(exclude_none=True)
+                        )
+                    except RuntimeError as exc:
+                        if "websocket.close" in str(exc):
+                            logger.info(f"[WS] Client disconnected before Whisper segment could be sent (sid={sid})")
+                        else:
+                            raise
+                    except Exception as exc:
+                        logger.warning(f"[WS] Error sending Whisper segment: {exc}")
 
                 # 4. Run streaming transcription with the accumulated audio.
                 await whisper_svc.transcribe_streaming(
