@@ -71,37 +71,34 @@ async def websocket_endpoint(
 
     try:
         while True:
+            import asyncio
             data = await websocket.receive_bytes()
 
-            # 1. Decode binary Opus message from OBS plugin.
-            #    The OBS plugin already accumulates audio locally!
-            #    This means message.audio_pcm contains the FULL audio for this
-            #    sentence_id up to the current moment. We DO NOT need to accumulate it.
-            message = decoder.decode_message(data)
-            sid = message.sentence_id
+            # ── Drain queue to avoid backlog of stale partials ──────────────
+            messages_to_process = [decoder.decode_message(data)]
+            try:
+                while True:
+                    # Non-blocking peek (1ms timeout) to grab any queued packets
+                    extra_data = await asyncio.wait_for(websocket.receive_bytes(), timeout=0.001)
+                    messages_to_process.append(decoder.decode_message(extra_data))
+            except asyncio.TimeoutError:
+                pass
+            except Exception:
+                pass
 
-            # ── Backpressure: discard stale partial segments ───────────────────
-            # The plugin sends a partial every ~1 s containing the FULL accumulated
-            # audio for that sentence_id. If Whisper is already running, queueing
-            # another partial causes a chain of back-to-back inferences that all
-            # replay the same growing audio — the visible "catch-up" effect.
-            #
-            # Rules:
-            #   - Partial while Whisper is free  → process normally.
-            #   - Partial while Whisper is busy  → store it, skip processing.
-            #   - Final                          → always process; clear stored partial.
-            if not message.is_final:
-                latest_partial[sid] = data  # keep the freshest version
-                if whisper_svc.is_busy:
-                    logger.debug(
-                        f"[WS] Dropped stale partial sid={sid} — Whisper busy"
-                    )
-                    continue
+            # ── Collapse stale partials ─────────────────────────────────────
+            # Keep all 'final' messages (so we don't lose completed sentences),
+            # but only keep the VERY LAST message if it's a 'partial' (discarding older partials).
+            finals = [m for m in messages_to_process if m.is_final]
+            last_msg = messages_to_process[-1]
+            
+            if not last_msg.is_final:
+                to_process = finals + [last_msg]
             else:
-                # Final arrived: we no longer need the buffered partial
-                latest_partial.pop(sid, None)
+                to_process = finals
 
-            # 2. Dispatch to the active transcription pipeline.
+            for message in to_process:
+                sid = message.sentence_id
             if ai_translation_active:
                 # ── Pipeline: Whisper transcribes → AI translates (streaming) ──
 
@@ -117,26 +114,39 @@ async def websocket_endpoint(
                     accumulated = ""
                     async for token in translator.translate_stream(text, lang_in, lang_out):
                         accumulated += token
-
-                    # Send the full translated segment as a single response.
-                    # (Sending mid-stream tokens would display incomplete words
-                    #  in the OBS plugin subtitle overlay.)
-                    response = WSResponse(
-                        text=accumulated.strip(),
-                        sentence_id=sid,
-                        is_final=is_final,
-                    )
-                    try:
-                        await websocket.send_text(
-                            response.model_dump_json(exclude_none=True)
+                        # Stream the partial translation so the user sees words appearing
+                        response = WSResponse(
+                            text=accumulated.lstrip(),
+                            sentence_id=sid,
+                            is_final=False,
                         )
-                    except RuntimeError as exc:
-                        if "websocket.close" in str(exc):
-                            logger.info(f"[WS] Client disconnected before AI segment could be sent (sid={sid})")
-                        else:
-                            raise
-                    except Exception as exc:
-                        logger.warning(f"[WS] Error sending AI segment: {exc}")
+                        try:
+                            await websocket.send_text(
+                                response.model_dump_json(exclude_none=True)
+                            )
+                        except RuntimeError as exc:
+                            if "websocket.close" in str(exc):
+                                logger.info(f"[WS] Client disconnected before AI segment could be sent (sid={sid})")
+                                return
+                            else:
+                                raise
+                        except Exception as exc:
+                            logger.warning(f"[WS] Error sending AI segment: {exc}")
+                            return
+
+                    # Send the final flag once streaming is complete, if the original message was final
+                    if is_final:
+                        response = WSResponse(
+                            text=accumulated.strip(),
+                            sentence_id=sid,
+                            is_final=True,
+                        )
+                        try:
+                            await websocket.send_text(
+                                response.model_dump_json(exclude_none=True)
+                            )
+                        except Exception:
+                            pass
 
                 # 3. Run streaming transcription; on_segment_with_ai handles
                 #    the AI translation for each resulting segment.
