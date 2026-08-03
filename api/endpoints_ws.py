@@ -58,6 +58,7 @@ async def websocket_endpoint(
 
     whisper_svc = get_whisper_service()
     decoder = OpusAudioDecoder()
+    active_tasks: dict[int, asyncio.Task] = {}
 
     # Tracks the most recent partial audio per sentence_id so we can
     # process the latest version when Whisper is finally free, instead
@@ -113,6 +114,23 @@ async def websocket_endpoint(
                         final message once streaming completes.
                         If the AI translator fails, fallback to the raw transcribed text.
                         """
+                        if not is_final:
+                            # For partial segments, forward raw Whisper text immediately
+                            # without calling the LLM to avoid blocking the pipeline.
+                            partial_response = WSResponse(
+                                text=text.strip(),
+                                sentence_id=sid,
+                                is_final=False,
+                            )
+                            try:
+                                await websocket.send_text(
+                                    partial_response.model_dump_json(exclude_none=True)
+                                )
+                            except RuntimeError:
+                                pass
+                            return
+
+                        # Only run AI translation on final segments
                         accumulated = ""
                         try:
                             async for token in translator.translate_stream(text, lang_in, lang_out):
@@ -155,13 +173,19 @@ async def websocket_endpoint(
 
                     # 3. Run streaming transcription; on_segment_with_ai handles
                     #    the AI translation for each resulting segment.
-                    await whisper_svc.transcribe_streaming(
-                        audio_data=message.audio_pcm,
-                        on_segment=on_segment_with_ai,
-                        language=lang_in,
-                        task=task,
-                        is_final_message=message.is_final,
+                    if not message.is_final and sid in active_tasks and not active_tasks[sid].done():
+                        active_tasks[sid].cancel()
+
+                    transcription_task = asyncio.create_task(
+                        whisper_svc.transcribe_streaming(
+                            audio_data=message.audio_pcm,
+                            on_segment=on_segment_with_ai,
+                            language=lang_in,
+                            task=task,
+                            is_final_message=message.is_final,
+                        )
                     )
+                    active_tasks[sid] = transcription_task
 
                 else:
                     # ── Pipeline: Whisper transcribes/translates directly ──────────
@@ -187,13 +211,19 @@ async def websocket_endpoint(
                             logger.warning(f"[WS] Error sending Whisper segment: {exc}")
 
                     # 4. Run streaming transcription with the accumulated audio.
-                    await whisper_svc.transcribe_streaming(
-                        audio_data=message.audio_pcm,
-                        on_segment=on_segment,
-                        language=lang_in,
-                        task=task,
-                        is_final_message=message.is_final,
+                    if not message.is_final and sid in active_tasks and not active_tasks[sid].done():
+                        active_tasks[sid].cancel()
+
+                    transcription_task = asyncio.create_task(
+                        whisper_svc.transcribe_streaming(
+                            audio_data=message.audio_pcm,
+                            on_segment=on_segment,
+                            language=lang_in,
+                            task=task,
+                            is_final_message=message.is_final,
+                        )
                     )
+                    active_tasks[sid] = transcription_task
 
     except (WebSocketDisconnect, RuntimeError) as e:
         logger.info(f"[WS] Client disconnected or socket closed: {e}")

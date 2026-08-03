@@ -83,7 +83,7 @@ class WhisperService:
         lang = language if language and language not in ("auto", "original", "") else ""
         translate = task == "translate"
 
-        # Collect segments returned by faster-whisper.
+        loop = asyncio.get_event_loop()
         collected: list[str] = []
 
         def _run_transcription() -> None:
@@ -92,11 +92,22 @@ class WhisperService:
                 audio_data,
                 language=lang if lang else None,
                 task="translate" if translate else "transcribe",
+                beam_size=1,
+                vad_filter=True,
             )
             for segment in segments:
                 text = segment.text.strip()
                 if text:
                     collected.append(text)
+                    # Stream each segment to the caller as it's ready
+                    partial_text = " ".join(collected)
+                    future = asyncio.run_coroutine_threadsafe(
+                        on_segment(partial_text, False), loop
+                    )
+                    try:
+                        future.result(timeout=5.0)
+                    except Exception as exc:
+                        logger.warning(f"[Whisper] Segment stream error: {exc}")
 
         # Acquire the semaphore BEFORE entering the thread pool.
         # This guarantees that only one transcription runs at a time,
