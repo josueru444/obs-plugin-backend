@@ -28,6 +28,7 @@ async def websocket_endpoint(
         params = AudioQueryParams(
             lang_in=websocket.query_params.get("lang_in", "en"),
             lang_out=websocket.query_params.get("lang_out", "original"),
+            show_partial=websocket.query_params.get("show_partial", "true").lower() != "false",
         )
     except ValidationError as exc:
         # Reject the connection with a descriptive reason before accepting
@@ -39,6 +40,7 @@ async def websocket_endpoint(
 
     lang_in = params.lang_in
     lang_out = params.lang_out
+    show_partial = params.show_partial
 
     # Determine Whisper task and whether AI translation should take over.
     # If the translator is enabled, Whisper only transcribes (faster).
@@ -105,55 +107,48 @@ async def websocket_endpoint(
                     # ── Pipeline: Whisper transcribes → AI translates (streaming) ──
 
                     async def on_segment_with_ai(
-                        text: str, is_final: bool, sid: int = sid
+                        text: str, is_final: bool, sid: int = sid, _show_partial: bool = show_partial
                     ) -> None:
                         """
-                        Streams each Whisper segment through the AI translator
-                        and forwards tokens to the OBS plugin as they arrive.
-                        The full accumulated translation is sent as a single
-                        final message once streaming completes.
-                        If the AI translator fails, fallback to the raw transcribed text.
+                        Streams each Whisper segment through the AI translator.
+                        If _show_partial is True (realtime/balanced mode), partial segments are
+                        also translated by the AI translator in real-time in the target language.
+                        If _show_partial is False (finals_only mode), partial segments are suppressed
+                        and translation is only sent on final segments.
                         """
-                        if not is_final:
-                            # For partial segments, forward raw Whisper text immediately
-                            # without calling the LLM to avoid blocking the pipeline.
-                            partial_response = WSResponse(
-                                text=text.strip(),
-                                sentence_id=sid,
-                                is_final=False,
-                            )
-                            try:
-                                await websocket.send_text(
-                                    partial_response.model_dump_json(exclude_none=True)
-                                )
-                            except RuntimeError:
-                                pass
+                        if not is_final and not _show_partial:
+                            # Modo finals_only: ignorar segmentos parciales
                             return
 
-                        # Only run AI translation on final segments
                         accumulated = ""
                         try:
                             async for token in translator.translate_stream(text, lang_in, lang_out):
                                 accumulated += token
-                                # Stream intermediate partial tokens
-                                partial_response = WSResponse(
-                                    text=accumulated.strip(),
-                                    sentence_id=sid,
-                                    is_final=False,
-                                )
-                                try:
-                                    await websocket.send_text(
-                                        partial_response.model_dump_json(exclude_none=True)
+                                # Enviar tokens parciales traducidos AL CLIENTE solo si show_partial está activo
+                                if _show_partial:
+                                    partial_response = WSResponse(
+                                        text=accumulated.strip(),
+                                        sentence_id=sid,
+                                        is_final=False,
                                     )
-                                except RuntimeError:
-                                    pass # Connection might be closed, handled gracefully at the end
+                                    try:
+                                        await websocket.send_text(
+                                            partial_response.model_dump_json(exclude_none=True)
+                                        )
+                                    except RuntimeError:
+                                        pass
+                        except asyncio.CancelledError:
+                            raise
                         except Exception as exc:
-                            logger.warning(f"[WS] AI Translator stream error: {exc}. Falling back to raw transcript.")
-                            accumulated = text
+                            logger.warning(f"[WS] AI Translator stream error: {exc}. Suppressing raw fallback to prevent text flickering.")
+                            # No emitir texto sin traducir si falla el modelo de IA
+                            accumulated = ""
 
-                        out_text = accumulated.strip() if accumulated.strip() else text.strip()
+                        out_text = accumulated.strip()
+                        if not out_text and not is_final:
+                            return
 
-                        # Send the final accumulated text with the correct is_final flag
+                        # Enviar texto acumulado final con el flag is_final correspondiente
                         response = WSResponse(
                             text=out_text,
                             sentence_id=sid,
@@ -191,8 +186,11 @@ async def websocket_endpoint(
                     # ── Pipeline: Whisper transcribes/translates directly ──────────
 
                     async def on_segment(
-                        text: str, is_final: bool, sid: int = sid
+                        text: str, is_final: bool, sid: int = sid, _show_partial: bool = show_partial
                     ) -> None:
+                        if not is_final and not _show_partial:
+                            return
+
                         response = WSResponse(
                             text=text,
                             sentence_id=sid,

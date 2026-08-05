@@ -99,15 +99,6 @@ class WhisperService:
                 text = segment.text.strip()
                 if text:
                     collected.append(text)
-                    # Stream each segment to the caller as it's ready
-                    partial_text = " ".join(collected)
-                    future = asyncio.run_coroutine_threadsafe(
-                        on_segment(partial_text, False), loop
-                    )
-                    try:
-                        future.result(timeout=5.0)
-                    except Exception as exc:
-                        logger.warning(f"[Whisper] Segment stream error: {exc}")
 
         # Acquire the semaphore BEFORE entering the thread pool.
         # This guarantees that only one transcription runs at a time,
@@ -120,8 +111,7 @@ class WhisperService:
 
         # Stream collected segments back to the WebSocket caller.
         # We concatenate all segments into a single string representing the
-        # full transcription of the current audio buffer to prevent the client
-        # from overwriting partial sentences with the same sentence ID.
+        # full transcription of the current audio buffer.
         full_text = " ".join(collected)
         await on_segment(full_text, is_final_message)
 

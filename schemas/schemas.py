@@ -27,6 +27,7 @@ class AudioQueryParams(BaseModel):
 
     lang_in: str = "es"
     lang_out: str = "original"
+    show_partial: bool = True
 
     @field_validator("lang_in")
     @classmethod

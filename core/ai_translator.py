@@ -149,9 +149,26 @@ class GenericAITranslator(BaseTranslator):
         Stream the translation of *text* token by token.
         Uses the OpenAI-compatible /chat/completions endpoint with stream=True.
         """
-        system_msg = _SYSTEM_PROMPT.format(
-            source_lang=source_lang, target_lang=target_lang
-        )
+        if "translategemma" in self._model.lower():
+            # El modelo translategemma en vLLM (y HuggingFace) exige un formato estructurado en el content
+            messages = [{
+                "role": "user", 
+                "content": [{
+                    "type": "text",
+                    "source_lang_code": source_lang,
+                    "target_lang_code": target_lang,
+                    "text": text
+                }]
+            }]
+        else:
+            # Modelos genéricos usan system prompt
+            system_msg = _SYSTEM_PROMPT.format(
+                source_lang=source_lang, target_lang=target_lang
+            )
+            messages = [
+                {"role": "system", "content": system_msg},
+                {"role": "user", "content": text},
+            ]
 
         logger.info(
             f"[AITranslator] Requesting translation via {self._client.base_url} (model={self._model})"
@@ -160,10 +177,7 @@ class GenericAITranslator(BaseTranslator):
         try:
             stream = await self._client.chat.completions.create(
                 model=self._model,
-                messages=[
-                    {"role": "system", "content": system_msg},
-                    {"role": "user", "content": text},
-                ],
+                messages=messages,
                 max_tokens=self._max_tokens,
                 stream=True,
                 temperature=0.1,  # Low temperature for consistent, accurate translations
