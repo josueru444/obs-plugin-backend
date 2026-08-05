@@ -150,33 +150,35 @@ class GenericAITranslator(BaseTranslator):
         Uses the OpenAI-compatible /chat/completions endpoint with stream=True.
         """
         if "translategemma" in self._model.lower():
-            # Bypass OpenAI SDK completely for translategemma using raw httpx 
-            # to guarantee the specific JSON structure isn't destroyed by Pydantic.
+            # Bypass OpenAI SDK and vLLM's chat template engine completely.
+            # vLLM's API server strips custom fields, breaking the transformers chat template.
+            # Solución: Usar el endpoint RAW /v1/completions y formatear el prompt de Gemma manualmente.
             import httpx
             import json
+            
+            # Formato RAW de Gemma
+            prompt = (
+                "<start_of_turn>user\n"
+                f"Translate this from {source_lang} to {target_lang}:\n"
+                f"{text}<end_of_turn>\n"
+                "<start_of_turn>model\n"
+            )
+            
             payload = {
                 "model": self._model,
-                "messages": [{
-                    "role": "user", 
-                    "content": [{
-                        "type": "text",
-                        "source_lang_code": source_lang,
-                        "target_lang_code": target_lang,
-                        "text": text
-                    }]
-                }],
+                "prompt": prompt,
                 "stream": True,
                 "temperature": 0.1,
                 "max_tokens": self._max_tokens
             }
             
-            logger.info(f"[AITranslator] Requesting translation via {self._client.base_url} (model={self._model}) using raw httpx")
+            logger.info(f"[AITranslator] Requesting translation via {self._client.base_url} (model={self._model}) using raw /completions")
             
             headers = {"Authorization": f"Bearer {self._client.api_key}", "Content-Type": "application/json"}
             url = str(self._client.base_url)
             if not url.endswith('/'):
                 url += '/'
-            url += "chat/completions"
+            url += "completions"  # NOT chat/completions
             
             try:
                 async with httpx.AsyncClient() as client:
@@ -189,7 +191,7 @@ class GenericAITranslator(BaseTranslator):
                                     break
                                 try:
                                     data = json.loads(data_str)
-                                    delta = data["choices"][0]["delta"].get("content")
+                                    delta = data["choices"][0].get("text")
                                     if delta:
                                         yield delta
                                 except Exception:
