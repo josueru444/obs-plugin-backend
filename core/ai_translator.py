@@ -156,10 +156,14 @@ class GenericAITranslator(BaseTranslator):
             import httpx
             import json
             
-            # Formato RAW de Gemma
+            # Formato RAW de Gemma con el prompt estricto oficial de TranslateGemma
+            # Esto evita que el modelo sea 'charlatán' y devuelva opciones o comentarios.
             prompt = (
                 "<start_of_turn>user\n"
-                f"Translate this from {source_lang} to {target_lang}:\n"
+                f"You are a professional {source_lang} to {target_lang} translator. "
+                f"Your goal is to accurately convey the meaning and nuances of the original {source_lang} text while adhering to {target_lang} grammar, vocabulary, and cultural sensitivities. "
+                f"Produce only the {target_lang} translation, without any additional explanations or commentary. "
+                f"Please translate the following {source_lang} text into {target_lang}:\n\n"
                 f"{text}<end_of_turn>\n"
                 "<start_of_turn>model\n"
             )
