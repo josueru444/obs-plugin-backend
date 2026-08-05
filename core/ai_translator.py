@@ -149,31 +149,64 @@ class GenericAITranslator(BaseTranslator):
         Stream the translation of *text* token by token.
         Uses the OpenAI-compatible /chat/completions endpoint with stream=True.
         """
-        extra_kwargs = {}
         if "translategemma" in self._model.lower():
-            # El modelo translategemma en vLLM (y HuggingFace) exige un formato estructurado en el content
-            # OJO: La librería OpenAI Python descarta (strip) campos desconocidos como source_lang_code.
-            # Para evitarlo, usamos 'extra_body' que inyecta el JSON tal cual en la petición HTTP.
-            actual_messages = [{
-                "role": "user", 
-                "content": [{
-                    "type": "text",
-                    "source_lang_code": source_lang,
-                    "target_lang_code": target_lang,
-                    "text": text
-                }]
-            }]
-            messages = [{"role": "user", "content": text}]  # Dummy para pasar la validación local de pydantic
-            extra_kwargs["extra_body"] = {"messages": actual_messages}
-        else:
-            # Modelos genéricos usan system prompt
-            system_msg = _SYSTEM_PROMPT.format(
-                source_lang=source_lang, target_lang=target_lang
-            )
-            messages = [
-                {"role": "system", "content": system_msg},
-                {"role": "user", "content": text},
-            ]
+            # Bypass OpenAI SDK completely for translategemma using raw httpx 
+            # to guarantee the specific JSON structure isn't destroyed by Pydantic.
+            import httpx
+            import json
+            payload = {
+                "model": self._model,
+                "messages": [{
+                    "role": "user", 
+                    "content": [{
+                        "type": "text",
+                        "source_lang_code": source_lang,
+                        "target_lang_code": target_lang,
+                        "text": text
+                    }]
+                }],
+                "stream": True,
+                "temperature": 0.1,
+                "max_tokens": self._max_tokens
+            }
+            
+            logger.info(f"[AITranslator] Requesting translation via {self._client.base_url} (model={self._model}) using raw httpx")
+            
+            headers = {"Authorization": f"Bearer {self._client.api_key}", "Content-Type": "application/json"}
+            url = str(self._client.base_url)
+            if not url.endswith('/'):
+                url += '/'
+            url += "chat/completions"
+            
+            try:
+                async with httpx.AsyncClient() as client:
+                    async with client.stream("POST", url, json=payload, headers=headers) as response:
+                        response.raise_for_status()
+                        async for line in response.aiter_lines():
+                            if line.startswith("data: "):
+                                data_str = line[6:].strip()
+                                if data_str == "[DONE]":
+                                    break
+                                try:
+                                    data = json.loads(data_str)
+                                    delta = data["choices"][0]["delta"].get("content")
+                                    if delta:
+                                        yield delta
+                                except Exception:
+                                    pass
+            except Exception as err:
+                logger.error(f"[AITranslator] Connection error to {url}: {err}")
+                raise
+            return
+
+        # Modelos genéricos usan system prompt (vía OpenAI SDK)
+        system_msg = _SYSTEM_PROMPT.format(
+            source_lang=source_lang, target_lang=target_lang
+        )
+        messages = [
+            {"role": "system", "content": system_msg},
+            {"role": "user", "content": text},
+        ]
 
         logger.info(
             f"[AITranslator] Requesting translation via {self._client.base_url} (model={self._model})"
@@ -186,7 +219,6 @@ class GenericAITranslator(BaseTranslator):
                 max_tokens=self._max_tokens,
                 stream=True,
                 temperature=0.1,  # Low temperature for consistent, accurate translations
-                **extra_kwargs
             )
         except Exception as err:
             cause = f" Cause: {err.__cause__}" if getattr(err, '__cause__', None) else ""
