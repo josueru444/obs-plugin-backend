@@ -28,6 +28,15 @@ class AudioQueryParams(BaseModel):
     lang_in: str = "es"
     lang_out: str = "original"
     show_partial: bool = True
+    partial_strategy: str = "buffered"
+
+    @field_validator("partial_strategy")
+    @classmethod
+    def validate_partial_strategy(cls, v: str) -> str:
+        v = v.strip().lower()
+        if v not in {"buffered", "streaming"}:
+            raise ValueError("partial_strategy must be 'buffered' or 'streaming'")
+        return v
 
     @field_validator("lang_in")
     @classmethod
@@ -50,3 +59,9 @@ class AudioQueryParams(BaseModel):
                 f"Must be one of: {sorted(SUPPORTED_LANGUAGES)}"
             )
         return v
+
+
+class TextTranslateRequest(BaseModel):
+    text: str
+    is_final: bool
+    sentence_id: int

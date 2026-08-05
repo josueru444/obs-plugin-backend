@@ -29,6 +29,7 @@ async def websocket_endpoint(
             lang_in=websocket.query_params.get("lang_in", "en"),
             lang_out=websocket.query_params.get("lang_out", "original"),
             show_partial=websocket.query_params.get("show_partial", "true").lower() != "false",
+            partial_strategy=websocket.query_params.get("partial_strategy", "buffered"),
         )
     except ValidationError as exc:
         # Reject the connection with a descriptive reason before accepting
@@ -41,6 +42,7 @@ async def websocket_endpoint(
     lang_in = params.lang_in
     lang_out = params.lang_out
     show_partial = params.show_partial
+    partial_strategy = params.partial_strategy
 
     # Determine Whisper task and whether AI translation should take over.
     # If the translator is enabled, Whisper only transcribes (faster).
@@ -107,7 +109,8 @@ async def websocket_endpoint(
                     # ── Pipeline: Whisper transcribes → AI translates (streaming) ──
 
                     async def on_segment_with_ai(
-                        text: str, is_final: bool, sid: int = sid, _show_partial: bool = show_partial
+                        text: str, is_final: bool, sid: int = sid, _show_partial: bool = show_partial,
+                        _partial_strategy: str = partial_strategy
                     ) -> None:
                         """
                         Streams each Whisper segment through the AI translator.
@@ -125,7 +128,7 @@ async def websocket_endpoint(
                             async for token in translator.translate_stream(text, lang_in, lang_out):
                                 accumulated += token
                                 # Enviar tokens parciales traducidos AL CLIENTE solo si show_partial está activo
-                                if _show_partial:
+                                if _show_partial and (is_final or _partial_strategy == "streaming"):
                                     partial_response = WSResponse(
                                         text=accumulated.strip(),
                                         sentence_id=sid,
