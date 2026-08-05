@@ -149,9 +149,12 @@ class GenericAITranslator(BaseTranslator):
         Stream the translation of *text* token by token.
         Uses the OpenAI-compatible /chat/completions endpoint with stream=True.
         """
+        extra_kwargs = {}
         if "translategemma" in self._model.lower():
             # El modelo translategemma en vLLM (y HuggingFace) exige un formato estructurado en el content
-            messages = [{
+            # OJO: La librería OpenAI Python descarta (strip) campos desconocidos como source_lang_code.
+            # Para evitarlo, usamos 'extra_body' que inyecta el JSON tal cual en la petición HTTP.
+            actual_messages = [{
                 "role": "user", 
                 "content": [{
                     "type": "text",
@@ -160,6 +163,8 @@ class GenericAITranslator(BaseTranslator):
                     "text": text
                 }]
             }]
+            messages = [{"role": "user", "content": text}]  # Dummy para pasar la validación local de pydantic
+            extra_kwargs["extra_body"] = {"messages": actual_messages}
         else:
             # Modelos genéricos usan system prompt
             system_msg = _SYSTEM_PROMPT.format(
@@ -181,6 +186,7 @@ class GenericAITranslator(BaseTranslator):
                 max_tokens=self._max_tokens,
                 stream=True,
                 temperature=0.1,  # Low temperature for consistent, accurate translations
+                **extra_kwargs
             )
         except Exception as err:
             cause = f" Cause: {err.__cause__}" if getattr(err, '__cause__', None) else ""
